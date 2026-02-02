@@ -28,6 +28,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# this dictionary defines how many tasks per category should be completed each week
+# this is used for progress tracking and reporting
 category_ammounts = {
     "toilet": 2,
     "shower": 2,
@@ -65,11 +67,14 @@ class CorridorBot:
         self.app.add_handler(CommandHandler("help", self.cmd_help))
         self.app.add_handler(CommandHandler("complete", self.cmd_complete))
         self.app.add_handler(CommandHandler("done", self.cmd_complete))  # Alias
+        self.app.add_handler(CommandHandler("amend", self.cmd_amend))  # NEW
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("ask", self.cmd_ask))
         self.app.add_handler(CommandHandler("tasks", self.cmd_tasks))
         self.app.add_handler(CommandHandler("mystats", self.cmd_my_stats))
-        self.app.add_handler(CommandHandler("map", self.cmd_show_map))  
+        self.app.add_handler(CommandHandler("optout", self.cmd_optout))  # NEW
+        self.app.add_handler(CommandHandler("whooptedout", self.cmd_who_opted_out))  # NEW
+        self.app.add_handler(CommandHandler("map", self.cmd_show_map))
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Register or welcome a user."""
@@ -115,10 +120,17 @@ class CorridorBot:
             "/tasks - List all available tasks\n"
             "/complete `<task>` - Mark a task complete\n"
             "  Example: `/complete Toilet 1`\n"
-            "/done `<task>` - Same as /complete\n\n"
+            "/done `<task>` - Same as /complete\n"
+            "/amend `<task>` - Undo task completion (fix mistakes)\n\n"
+            "*Opt-Out Management:*\n"
+            "/optout `<task>` `<reason>` - Opt out of a task\n"
+            "  Example: `/optout Fridge 1 I have my own fridge`\n"
+            "/whooptedout - See all opt-outs\n"
+            "/whooptedout `<task>` - Who opted out of a task\n\n"
             "*Information:*\n"
             "/ask `<task>` - Get task instructions\n"
-            "/mystats - View your personal stats\n\n"
+            "/mystats - View your personal stats\n"
+            "/map - Show corridor map\n\n"
             "*General:*\n"
             "/start - Register or get started\n"
             "/help - Show this message\n\n"
@@ -187,7 +199,9 @@ class CorridorBot:
                     completer = db.query(Person).get(completed_task.completed_by)
                     await update.message.reply_text(
                         f"❌ '{completed_task.task_type.name}' was already completed by {completer.name}.\n\n"
-                        f"Use /status to see remaining tasks."
+                        f"Use /status to see remaining tasks.\n"
+                        f"To fix a mistake, use: `/amend {completed_task.task_type.name}`",
+                        parse_mode=ParseMode.MARKDOWN
                     )
                 else:
                     await update.message.reply_text(
@@ -271,6 +285,261 @@ class CorridorBot:
                     text=group_message,
                     parse_mode=ParseMode.MARKDOWN
                 )
+    
+    async def cmd_amend(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Undo a task completion (fix mistakes)."""
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Please specify which task to amend!\n\n"
+                "Usage: `/amend <task_name>`\n"
+                "Example: `/amend Toilet 1`\n\n"
+                "This will undo the completion and mark it as pending again.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        task_query = " ".join(context.args)
+        user = update.effective_user
+        
+        with get_db() as db:
+            # Get current week
+            current_week = db.query(Week).filter_by(closed=False).order_by(Week.deadline.desc()).first()
+            if not current_week:
+                await update.message.reply_text(
+                    "❌ No active week found. Contact an administrator."
+                )
+                return
+            
+            # Get person
+            person = db.query(Person).filter_by(telegram_id=user.id).first()
+            if not person:
+                await update.message.reply_text(
+                    "❌ You're not registered! Use /start to register first."
+                )
+                return
+            
+            # Find matching COMPLETED task instance
+            task_instance = (
+                db.query(TaskInstance)
+                .join(TaskType)
+                .filter(
+                    TaskInstance.week_id == current_week.id,
+                    TaskInstance.status == "completed",
+                    TaskType.name.ilike(f"%{task_query}%")
+                )
+                .first()
+            )
+            
+            if not task_instance:
+                await update.message.reply_text(
+                    f"❌ No completed task matching '{task_query}' found.\n\n"
+                    f"Use /status to see completed tasks."
+                )
+                return
+            
+            # Get who originally completed it
+            original_completer = db.query(Person).get(task_instance.completed_by)
+            
+            # Undo the completion
+            task_instance.status = "pending"
+            old_completer_id = task_instance.completed_by
+            old_completed_at = task_instance.completed_at
+            task_instance.completed_by = None
+            task_instance.completed_at = None
+            
+            # Log the amendment
+            log = CompletionLog(
+                task_instance_id=task_instance.id,
+                person_id=person.id,
+                action="amended",
+                message_id=update.message.message_id
+            )
+            db.add(log)
+            db.commit()
+            
+            # Send confirmation
+            message = (
+                f"✅ Task amended successfully!\n\n"
+                f"*{task_instance.task_type.name}* is now pending again.\n"
+                f"Originally marked complete by: {original_completer.name}\n"
+                f"Amended by: {person.name}\n\n"
+                f"Use `/complete {task_instance.task_type.name}` to mark it done correctly."
+            )
+            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+            
+            # Notify group
+            if update.effective_chat.type in ["group", "supergroup"]:
+                group_message = (
+                    f"⚠️ {person.name} amended *{task_instance.task_type.name}*\n"
+                    f"Task is now pending again (was completed by {original_completer.name})"
+                )
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=group_message,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+    
+    async def cmd_optout(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Allow user to opt out of a task."""
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "❌ Please specify task and reason!\n\n"
+                "Usage: `/optout <task_name> <reason>`\n"
+                "Example: `/optout Fridge 1 I have my own fridge`\n"
+                "Example: `/optout Kitchen A I don't use communal kitchen`\n\n"
+                "Use /tasks to see all available tasks.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # First argument is task, rest is reason
+        task_query = context.args[0]
+        reason = " ".join(context.args[1:])
+        user = update.effective_user
+        
+        with get_db() as db:
+            # Get person
+            person = db.query(Person).filter_by(telegram_id=user.id).first()
+            if not person:
+                await update.message.reply_text(
+                    "❌ You're not registered! Use /start to register first."
+                )
+                return
+            
+            # Find matching task type
+            task_type = (
+                db.query(TaskType)
+                .filter(TaskType.name.ilike(f"%{task_query}%"))
+                .first()
+            )
+            
+            if not task_type:
+                await update.message.reply_text(
+                    f"❌ Task matching '{task_query}' not found.\n\n"
+                    f"Use /tasks to see all available tasks."
+                )
+                return
+            
+            # Check if already opted out
+            existing_opt_out = (
+                db.query(TaskOptOut)
+                .filter_by(person_id=person.id, task_type_id=task_type.id)
+                .first()
+            )
+            
+            if existing_opt_out:
+                await update.message.reply_text(
+                    f"⚠️ You're already opted out of '{task_type.name}'.\n"
+                    f"Current reason: {existing_opt_out.reason}\n\n"
+                    f"Contact an administrator if you want to change the reason or opt back in."
+                )
+                return
+            
+            # Create opt-out
+            opt_out = TaskOptOut(
+                person_id=person.id,
+                task_type_id=task_type.id,
+                reason=reason
+            )
+            db.add(opt_out)
+            db.commit()
+            
+            # Send confirmation
+            message = (
+                f"✅ Opt-out successful!\n\n"
+                f"You've opted out of: *{task_type.name}*\n"
+                f"Reason: {reason}\n\n"
+                f"You won't be expected to complete this task.\n"
+                f"Use `/whooptedout {task_type.name}` to see all opt-outs for this task."
+            )
+            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+            
+            # Notify group
+            if update.effective_chat.type in ["group", "supergroup"]:
+                group_message = (
+                    f"ℹ️ {person.name} opted out of *{task_type.name}*\n"
+                    f"Reason: {reason}"
+                )
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=group_message,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+    
+    async def cmd_who_opted_out(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show who opted out of what."""
+        with get_db() as db:
+            if not context.args:
+                # Show all opt-outs
+                opt_outs = (
+                    db.query(TaskOptOut)
+                    .join(Person)
+                    .join(TaskType)
+                    .order_by(TaskType.category, TaskType.name)
+                    .all()
+                )
+                
+                if not opt_outs:
+                    await update.message.reply_text(
+                        "ℹ️ No one has opted out of any tasks yet!"
+                    )
+                    return
+                
+                # Group by task type
+                by_task = {}
+                for opt_out in opt_outs:
+                    task_name = opt_out.task_type.name
+                    if task_name not in by_task:
+                        by_task[task_name] = []
+                    person = db.query(Person).get(opt_out.person_id)
+                    by_task[task_name].append(f"{person.name} ({opt_out.reason})")
+                
+                message = "📋 *Current Opt-Outs*\n\n"
+                for task_name in sorted(by_task.keys()):
+                    message += f"*{task_name}:*\n"
+                    for person_info in by_task[task_name]:
+                        message += f"  • {person_info}\n"
+                    message += "\n"
+                
+                message += f"💡 Use `/whooptedout <task>` to filter by task"
+                
+            else:
+                # Show opt-outs for specific task
+                task_query = " ".join(context.args)
+                
+                task_type = (
+                    db.query(TaskType)
+                    .filter(TaskType.name.ilike(f"%{task_query}%"))
+                    .first()
+                )
+                
+                if not task_type:
+                    await update.message.reply_text(
+                        f"❌ Task matching '{task_query}' not found.\n\n"
+                        f"Use /tasks to see all available tasks."
+                    )
+                    return
+                
+                opt_outs = (
+                    db.query(TaskOptOut)
+                    .filter_by(task_type_id=task_type.id)
+                    .all()
+                )
+                
+                if not opt_outs:
+                    await update.message.reply_text(
+                        f"ℹ️ No one has opted out of *{task_type.name}*",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                    return
+                
+                message = f"📋 *Opt-Outs for {task_type.name}*\n\n"
+                for opt_out in opt_outs:
+                    person = db.query(Person).get(opt_out.person_id)
+                    message += f"• {person.name}\n"
+                    message += f"  Reason: {opt_out.reason}\n\n"
+        
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show weekly task status."""
@@ -528,3 +797,4 @@ class CorridorBot:
 if __name__ == "__main__":
     bot = CorridorBot()
     bot.run()
+
