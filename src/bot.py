@@ -1,4 +1,4 @@
-"""Corridor Cleaning Bot - Interactive Version with Menus."""
+"""Corridor Cleaning Bot - With Private/Group Chat Controls."""
 
 import sys
 from pathlib import Path
@@ -54,11 +54,13 @@ category_emojis = {
 
 
 class CorridorBot:
-    """Main bot class with interactive menus."""
+    """Main bot class with private/group chat controls."""
     
     def __init__(self):
         """Initialize the bot."""
         self.app = Application.builder().token(settings.telegram_bot_token).build()
+        # Get group chat ID from settings (you can configure this)
+        self.group_chat_id = settings.telegram_chat_id
         self._register_handlers()
     
     def _register_handlers(self):
@@ -71,31 +73,93 @@ class CorridorBot:
         self.app.add_handler(CommandHandler("tasks", self.cmd_tasks))
         self.app.add_handler(CommandHandler("mystats", self.cmd_my_stats))
         self.app.add_handler(CommandHandler("map", self.cmd_show_map))
+        self.app.add_handler(CommandHandler("optout", self.cmd_optout))  # ADDED!
         self.app.add_handler(CommandHandler("whooptedout", self.cmd_who_opted_out))
         
         # Callback handler for button clicks
         self.app.add_handler(CallbackQueryHandler(self.handle_callback))
     
-    def create_main_menu(self):
-        """Create the main menu keyboard."""
-        keyboard = [
-            [
-                InlineKeyboardButton("📋 View Status", callback_data="status"),
-                InlineKeyboardButton("✅ Complete Task", callback_data="complete:categories")
-            ],
-            [
-                InlineKeyboardButton("❌ Amend Task", callback_data="amend:categories"),
-                InlineKeyboardButton("❓ Ask Instructions", callback_data="ask:categories")
-            ],
-            [
-                InlineKeyboardButton("🚫 Opt Out", callback_data="optout:categories"),
-                InlineKeyboardButton("📊 My Stats", callback_data="mystats")
-            ],
-            [
-                InlineKeyboardButton("🗺️ Show Map", callback_data="map"),
-                InlineKeyboardButton("💡 Help", callback_data="help")
+    def is_private_chat(self, update: Update) -> bool:
+        """Check if the message is from a private chat."""
+        return update.effective_chat.type == "private"
+    
+    async def redirect_to_private(self, update: Update, action_name: str):
+        """Redirect user to private chat for private actions."""
+        bot_username = (await update.get_bot()).username
+        text = (
+            f"🔒 *{action_name} is only available in private chat!*\n\n"
+            f"Click the button below to open private chat with me:"
+        )
+        
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "💬 Open Private Chat",
+                url=f"https://t.me/{bot_username}"
+            )
+        ]])
+        
+        # If it's a callback query, edit the message
+        if update.callback_query:
+            await update.callback_query.answer("This action requires private chat!")
+            await update.callback_query.edit_message_text(
+                text=text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                text=text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
+    async def notify_group(self, message: str):
+        """Send a notification to the group chat."""
+        if self.group_chat_id:
+            try:
+                await self.app.bot.send_message(
+                    chat_id=self.group_chat_id,
+                    text=message,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Failed to send group notification: {e}")
+    
+    def create_main_menu(self, is_private: bool = True):
+        """Create the main menu keyboard based on chat type."""
+        if is_private:
+            # Full menu for private chat
+            keyboard = [
+                [
+                    InlineKeyboardButton("📋 View Status", callback_data="status"),
+                    InlineKeyboardButton("✅ Complete Task", callback_data="complete:categories")
+                ],
+                [
+                    InlineKeyboardButton("❌ Amend Task", callback_data="amend:categories"),
+                    InlineKeyboardButton("❓ Ask Instructions", callback_data="ask:categories")
+                ],
+                [
+                    InlineKeyboardButton("🚫 Opt Out", callback_data="optout:categories"),
+                    InlineKeyboardButton("📊 My Stats", callback_data="mystats")
+                ],
+                [
+                    InlineKeyboardButton("🗺️ Show Map", callback_data="map"),
+                    InlineKeyboardButton("💡 Help", callback_data="help")
+                ]
             ]
-        ]
+        else:
+            # Limited menu for group chat (only public actions)
+            keyboard = [
+                [
+                    InlineKeyboardButton("📋 View Status", callback_data="status"),
+                    InlineKeyboardButton("📝 List Tasks", callback_data="tasks")
+                ],
+                [
+                    InlineKeyboardButton("👥 Who Opted Out", callback_data="whooptedout"),
+                    InlineKeyboardButton("💡 Help", callback_data="help")
+                ]
+            ]
+        
         return InlineKeyboardMarkup(keyboard)
     
     def create_category_menu(self, action="complete"):
@@ -217,17 +281,29 @@ class CorridorBot:
         parts = data.split(":")
         action = parts[0]
         
+        # Define which actions require private chat
+        private_actions = ["complete", "amend", "ask", "optout", "mystats", "map"]
+        
+        # Check if action requires private chat
+        if action in private_actions and not self.is_private_chat(update):
+            await self.redirect_to_private(update, action.title())
+            return
+        
         # Route to appropriate handler
         if action == "menu":
             await self.show_main_menu(query)
         elif action == "status":
             await self.show_status_callback(query)
+        elif action == "tasks":
+            await self.show_tasks_callback(query)
         elif action == "mystats":
             await self.show_stats_callback(query)
         elif action == "map":
             await self.show_map_callback(query)
         elif action == "help":
             await self.show_help_callback(query)
+        elif action == "whooptedout":
+            await self.show_whooptedout_callback(query)
         elif action == "complete":
             await self.handle_complete_flow(query, parts)
         elif action == "amend":
@@ -239,18 +315,27 @@ class CorridorBot:
     
     async def show_main_menu(self, query):
         """Show the main menu."""
-        text = (
-            "🤖 *Pablito's Corridor Manager*\n\n"
-            "Choose an action:"
-        )
+        is_private = query.message.chat.type == "private"
+        
+        if is_private:
+            text = (
+                "🤖 *Pablito's Corridor Manager*\n\n"
+                "🔒 Private Menu - Choose an action:"
+            )
+        else:
+            text = (
+                "🤖 *Pablito's Corridor Manager*\n\n"
+                "👥 Group Menu - Public actions only:"
+            )
+        
         await query.edit_message_text(
             text=text,
-            reply_markup=self.create_main_menu(),
+            reply_markup=self.create_main_menu(is_private),
             parse_mode=ParseMode.MARKDOWN
         )
     
     async def handle_complete_flow(self, query, parts):
-        """Handle the complete task flow."""
+        """Handle the complete task flow (PRIVATE ONLY)."""
         user = query.from_user
         
         if len(parts) == 2 and parts[1] == "categories":
@@ -296,7 +381,7 @@ class CorridorBot:
             await self.complete_task_by_id(query, int(parts[2]))
     
     async def complete_task_by_id(self, query, task_instance_id):
-        """Complete a task by its instance ID."""
+        """Complete a task by its instance ID (PRIVATE ONLY)."""
         user = query.from_user
         
         with get_db() as db:
@@ -356,7 +441,7 @@ class CorridorBot:
                 week_id=current_week.id, completed_by=person.id
             ).count()
             
-            # Send confirmation
+            # Send confirmation in private chat
             message = (
                 f"Eso es lo que nececitamos mijo!\n"
                 f"✅ *Great job, {person.name}!*\n\n"
@@ -376,22 +461,22 @@ class CorridorBot:
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            # Notify group
-            if query.message.chat.type in ["group", "supergroup"]:
-                if remaining <= 0:
-                    group_message = (
-                        f"🎉🎉🎉 ¡Mis amores! {person.name} Week Done! *{task_instance.task_type.name}*!\n"
-                        f"Time to chill 😎🍹"
-                    )
-                else:
-                    group_message = (
-                        f"✅ {person.name} completed: *{task_instance.task_type.name}*\n"
-                        f"📊 {remaining} remaining, hagamole pues!"
-                    )
-                await query.message.reply_text(group_message, parse_mode=ParseMode.MARKDOWN)
+            # NOTIFY GROUP
+            if remaining <= 0:
+                group_message = (
+                    f"🎉🎉🎉 ¡Mis amores! {person.name} Week Done! *{task_instance.task_type.name}*!\n"
+                    f"Time to chill 😎🍹"
+                )
+            else:
+                group_message = (
+                    f"✅ {person.name} completed: *{task_instance.task_type.name}*\n"
+                    f"📊 {remaining} remaining, hagamole pues!"
+                )
+            
+            await self.notify_group(group_message)
     
     async def handle_amend_flow(self, query, parts):
-        """Handle the amend task flow."""
+        """Handle the amend task flow (PRIVATE ONLY)."""
         if len(parts) == 2 and parts[1] == "categories":
             text = "❌ *Amend a Task*\n\nSelect a category:"
             keyboard = self.create_category_menu("amend")
@@ -432,7 +517,7 @@ class CorridorBot:
             await self.amend_task_by_id(query, int(parts[2]))
     
     async def amend_task_by_id(self, query, task_instance_id):
-        """Amend a task by its instance ID."""
+        """Amend a task by its instance ID (PRIVATE ONLY)."""
         user = query.from_user
         
         with get_db() as db:
@@ -464,6 +549,7 @@ class CorridorBot:
             db.add(log)
             db.commit()
             
+            # Send confirmation in private chat
             message = (
                 f"✅ Task amended!\n\n"
                 f"*{task_instance.task_type.name}* is now pending.\n"
@@ -482,16 +568,15 @@ class CorridorBot:
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            # Notify group
-            if query.message.chat.type in ["group", "supergroup"]:
-                group_message = (
-                    f"⚠️ {person.name} amended *{task_instance.task_type.name}*\n"
-                    f"(was completed by {original_completer.name})"
-                )
-                await query.message.reply_text(group_message, parse_mode=ParseMode.MARKDOWN)
+            # NOTIFY GROUP
+            group_message = (
+                f"⚠️ {person.name} amended *{task_instance.task_type.name}*\n"
+                f"(was completed by {original_completer.name})"
+            )
+            await self.notify_group(group_message)
     
     async def handle_ask_flow(self, query, parts):
-        """Handle the ask instructions flow."""
+        """Handle the ask instructions flow (PRIVATE ONLY)."""
         if len(parts) == 2 and parts[1] == "categories":
             text = "❓ *Ask Instructions*\n\nSelect a category:"
             keyboard = self.create_category_menu("ask")
@@ -519,7 +604,7 @@ class CorridorBot:
             await self.show_task_instructions(query, int(parts[2]))
     
     async def show_task_instructions(self, query, task_instance_id):
-        """Show instructions for a task."""
+        """Show instructions for a task (PRIVATE ONLY)."""
         with get_db() as db:
             task_instance = db.query(TaskInstance).get(task_instance_id)
             if not task_instance:
@@ -554,7 +639,7 @@ class CorridorBot:
             )
     
     async def handle_optout_flow(self, query, parts):
-        """Handle opt-out flow (shows message about using command)."""
+        """Handle opt-out flow (PRIVATE ONLY - shows message about using command)."""
         # Opt-out requires a reason, so we direct to command
         text = (
             "🚫 *Opt Out of a Task*\n\n"
@@ -576,7 +661,7 @@ class CorridorBot:
         )
     
     async def show_status_callback(self, query):
-        """Show status via callback."""
+        """Show status via callback (AVAILABLE IN BOTH)."""
         # Reuse existing status logic
         with get_db() as db:
             current_week = db.query(Week).filter_by(closed=False).order_by(Week.deadline.desc()).first()
@@ -585,7 +670,7 @@ class CorridorBot:
                 await query.edit_message_text("❌ No active week found.")
                 return
             
-            # Get progress summary (simplified for menu)
+            # Get progress summary
             all_instances = db.query(TaskInstance).filter_by(week_id=current_week.id).all()
             completed_count = len([t for t in all_instances if t.status == "completed"])
             total = sum([category_ammounts.get(cat, 1) for cat in category_ammounts.keys()])
@@ -610,8 +695,45 @@ class CorridorBot:
                 parse_mode=ParseMode.MARKDOWN
             )
     
+    async def show_tasks_callback(self, query):
+        """Show tasks list via callback (AVAILABLE IN BOTH)."""
+        with get_db() as db:
+            tasks = db.query(TaskType).order_by(TaskType.category, TaskType.name).all()
+            
+            by_category = {}
+            for task in tasks:
+                category = task.category or "other"
+                if category not in by_category:
+                    by_category[category] = []
+                by_category[category].append(task)
+            
+            message = "📋 *All Available Tasks*\n\n"
+            
+            for category, tasks in sorted(by_category.items()):
+                emoji = category_emojis.get(category, "📦")
+                target = category_ammounts.get(category, 1)
+                message += f"{emoji} *{category.title()}* [{target}/week]\n"
+                for task in tasks[:3]:  # Show first 3 per category
+                    duration = f" ({task.estimated_duration_minutes}min)" if task.estimated_duration_minutes else ""
+                    message += f"  • {task.name}{duration}\n"
+                if len(tasks) > 3:
+                    message += f"  ... and {len(tasks) - 3} more\n"
+                message += "\n"
+            
+            message += "💡 Use `/tasks` for complete list"
+            
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Back to Menu", callback_data="menu")
+            ]])
+            
+            await query.edit_message_text(
+                text=message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
     async def show_stats_callback(self, query):
-        """Show personal stats via callback."""
+        """Show personal stats via callback (PRIVATE ONLY)."""
         user = query.from_user
         
         with get_db() as db:
@@ -649,7 +771,7 @@ class CorridorBot:
             )
     
     async def show_map_callback(self, query):
-        """Show map via callback."""
+        """Show map via callback (PRIVATE ONLY)."""
         media_path = project_root / "media" / "corridor-overview.jpg"
         
         if media_path.exists():
@@ -676,19 +798,34 @@ class CorridorBot:
             )
     
     async def show_help_callback(self, query):
-        """Show help via callback."""
-        text = (
-            "🤖 *Pablito's Corridor Manager*\n\n"
-            "*Commands:*\n"
-            "/menu - Show this interactive menu\n"
-            "/status - Detailed weekly status\n"
-            "/tasks - List all tasks\n"
-            "/mystats - Your detailed stats\n"
-            "/optout <task> <reason> - Opt out\n"
-            "/whooptedout - See opt-outs\n"
-            "/map - Show corridor map\n\n"
-            "💡 Use the buttons for easy navigation!"
-        )
+        """Show help via callback (AVAILABLE IN BOTH)."""
+        is_private = query.message.chat.type == "private"
+        
+        if is_private:
+            text = (
+                "🤖 *Pablito's Corridor Manager*\n\n"
+                "🔒 *Private Chat Commands:*\n"
+                "/menu - Show full menu\n"
+                "/status - Weekly status\n"
+                "/tasks - List all tasks\n"
+                "/mystats - Your stats\n"
+                "/map - Corridor map\n"
+                "/optout <task> <reason> - Opt out\n"
+                "/whooptedout - See opt-outs\n\n"
+                "💡 Use buttons for easy task management!"
+            )
+        else:
+            text = (
+                "🤖 *Pablito's Corridor Manager*\n\n"
+                "👥 *Group Chat Commands:*\n"
+                "/status - Weekly status\n"
+                "/tasks - List all tasks\n"
+                "/whooptedout - See opt-outs\n\n"
+                "🔒 *Private Actions:*\n"
+                "To complete tasks, amend, or see your stats,\n"
+                "message me privately: @[bot_username]\n\n"
+                "💡 Use buttons for quick access!"
+            )
         
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("« Back to Menu", callback_data="menu")
@@ -700,11 +837,55 @@ class CorridorBot:
             parse_mode=ParseMode.MARKDOWN
         )
     
+    async def show_whooptedout_callback(self, query):
+        """Show opt-outs via callback (AVAILABLE IN BOTH)."""
+        with get_db() as db:
+            opt_outs = (
+                db.query(TaskOptOut)
+                .join(Person)
+                .join(TaskType)
+                .order_by(TaskType.category, TaskType.name)
+                .all()
+            )
+            
+            if not opt_outs:
+                message = "ℹ️ No one has opted out yet!"
+            else:
+                by_task = {}
+                for opt_out in opt_outs:
+                    task_name = opt_out.task_type.name
+                    if task_name not in by_task:
+                        by_task[task_name] = []
+                    person = db.query(Person).get(opt_out.person_id)
+                    by_task[task_name].append(f"{person.name}")
+                
+                message = "📋 *Current Opt-Outs*\n\n"
+                for task_name in sorted(list(by_task.keys())[:5]):  # Show first 5
+                    message += f"*{task_name}:* "
+                    message += ", ".join(by_task[task_name])
+                    message += "\n"
+                
+                if len(by_task) > 5:
+                    message += f"\n... and {len(by_task) - 5} more tasks\n"
+                
+                message += "\n💡 Use `/whooptedout` for full list"
+            
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("« Back to Menu", callback_data="menu")
+            ]])
+            
+            await query.edit_message_text(
+                text=message,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN
+            )
+    
     # ========== Command Handlers ==========
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Register user and show menu."""
         user = update.effective_user
+        is_private = self.is_private_chat(update)
         
         with get_db() as db:
             person = db.query(Person).filter_by(telegram_id=user.id).first()
@@ -722,40 +903,71 @@ class CorridorBot:
             else:
                 message = f"👋 Quiubo papi, {person.name}!\n\n"
         
-        message += "Use the menu below:"
+        if is_private:
+            message += "🔒 Private menu below (all features):"
+        else:
+            message += "👥 Group menu below (public features only):"
+        
         await update.message.reply_text(
             message,
-            reply_markup=self.create_main_menu()
+            reply_markup=self.create_main_menu(is_private)
         )
     
     async def cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show the main menu."""
+        is_private = self.is_private_chat(update)
+        
+        if is_private:
+            text = "🤖 *Pablito's Corridor Manager*\n\n🔒 Choose an action:"
+        else:
+            text = "🤖 *Pablito's Corridor Manager*\n\n👥 Public actions:"
+        
         await update.message.reply_text(
-            "🤖 *Pablito's Corridor Manager*\n\nChoose an action:",
-            reply_markup=self.create_main_menu(),
+            text,
+            reply_markup=self.create_main_menu(is_private),
             parse_mode=ParseMode.MARKDOWN
         )
     
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show help."""
-        text = (
-            "🤖 *Pablito's Corridor Manager*\n\n"
-            "*Interactive Menu:*\n"
-            "/menu - Show button menu\n"
-            "/start - Register & show menu\n\n"
-            "*Detailed Commands:*\n"
-            "/status - Full weekly status\n"
-            "/tasks - List all tasks\n"
-            "/mystats - Your detailed stats\n"
-            "/optout <task> <reason> - Opt out\n"
-            "/whooptedout - See opt-outs\n"
-            "/map - Show corridor map\n\n"
-            "💡 Use the buttons for easy task management!"
-        )
+        is_private = self.is_private_chat(update)
+        
+        if is_private:
+            text = (
+                "🤖 *Pablito's Corridor Manager*\n\n"
+                "*Interactive Menu:*\n"
+                "/menu - Show button menu\n"
+                "/start - Register & show menu\n\n"
+                "*Commands:*\n"
+                "/status - Full weekly status\n"
+                "/tasks - List all tasks\n"
+                "/mystats - Your detailed stats\n"
+                "/optout <task> <reason> - Opt out\n"
+                "/whooptedout - See opt-outs\n"
+                "/map - Show corridor map\n\n"
+                "💡 Use buttons for easy navigation!"
+            )
+        else:
+            text = (
+                "🤖 *Pablito's Corridor Manager*\n\n"
+                "*Group Commands:*\n"
+                "/status - Weekly status\n"
+                "/tasks - List all tasks\n"
+                "/whooptedout - See opt-outs\n\n"
+                "🔒 *For private actions:*\n"
+                "Message me privately to:\n"
+                "• Complete tasks\n"
+                "• Amend tasks\n"
+                "• See your stats\n"
+                "• View map\n"
+                "• Opt out of tasks\n\n"
+                "💡 Use buttons for quick access!"
+            )
+        
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show detailed status (keep full version)."""
+        """Show detailed status (AVAILABLE IN BOTH)."""
         with get_db() as db:
             current_week = db.query(Week).filter_by(closed=False).order_by(Week.deadline.desc()).first()
             
@@ -831,7 +1043,7 @@ class CorridorBot:
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_tasks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List all tasks."""
+        """List all tasks (AVAILABLE IN BOTH)."""
         with get_db() as db:
             tasks = db.query(TaskType).order_by(TaskType.category, TaskType.name).all()
             
@@ -856,7 +1068,11 @@ class CorridorBot:
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_my_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show detailed personal stats."""
+        """Show detailed personal stats (PRIVATE ONLY)."""
+        if not self.is_private_chat(update):
+            await self.redirect_to_private(update, "My Stats")
+            return
+        
         user = update.effective_user
         
         with get_db() as db:
@@ -906,7 +1122,11 @@ class CorridorBot:
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_show_map(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show corridor map."""
+        """Show corridor map (PRIVATE ONLY)."""
+        if not self.is_private_chat(update):
+            await self.redirect_to_private(update, "Map")
+            return
+        
         media_path = project_root / "media" / "corridor-overview.jpg"
         
         if media_path.exists():
@@ -920,8 +1140,96 @@ class CorridorBot:
         else:
             await update.message.reply_text("❌ Map not found.")
     
+    async def cmd_optout(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Allow user to opt out of a task (PRIVATE ONLY)."""
+        # Check if private chat
+        if not self.is_private_chat(update):
+            await self.redirect_to_private(update, "Opt Out")
+            return
+        
+        # Check arguments
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "❌ Please specify task and reason!\n\n"
+                "Usage: `/optout <task_name> <reason>`\n"
+                "Example: `/optout Fridge 1 I have my own fridge`\n"
+                "Example: `/optout Kitchen A I don't use communal kitchen`\n\n"
+                "Use /tasks to see all available tasks.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        # First argument is task, rest is reason
+        task_query = context.args[0]
+        reason = " ".join(context.args[1:])
+        user = update.effective_user
+        
+        with get_db() as db:
+            # Get person
+            person = db.query(Person).filter_by(telegram_id=user.id).first()
+            if not person:
+                await update.message.reply_text(
+                    "❌ You're not registered! Use /start to register first."
+                )
+                return
+            
+            # Find matching task type
+            task_type = (
+                db.query(TaskType)
+                .filter(TaskType.name.ilike(f"%{task_query}%"))
+                .first()
+            )
+            
+            if not task_type:
+                await update.message.reply_text(
+                    f"❌ Task matching '{task_query}' not found.\n\n"
+                    f"Use /tasks to see all available tasks."
+                )
+                return
+            
+            # Check if already opted out
+            existing_opt_out = (
+                db.query(TaskOptOut)
+                .filter_by(person_id=person.id, task_type_id=task_type.id)
+                .first()
+            )
+            
+            if existing_opt_out:
+                await update.message.reply_text(
+                    f"⚠️ You're already opted out of '{task_type.name}'.\n"
+                    f"Current reason: {existing_opt_out.reason}\n\n"
+                    f"Contact an administrator if you want to change the reason or opt back in."
+                )
+                return
+            
+            # Create opt-out
+            opt_out = TaskOptOut(
+                person_id=person.id,
+                task_type_id=task_type.id,
+                reason=reason
+            )
+            db.add(opt_out)
+            db.commit()
+            
+            # Send confirmation in private chat
+            message = (
+                f"✅ Opt-out successful!\n\n"
+                f"You've opted out of: *{task_type.name}*\n"
+                f"Reason: {reason}\n\n"
+                f"You won't be expected to complete this task.\n"
+                f"Use `/whooptedout {task_type.name}` to see all opt-outs for this task."
+            )
+            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+            
+            # NOTIFY GROUP
+            group_message = (
+                f"ℹ️ {person.name} opted out of *{task_type.name}*\n"
+                f"Reason: {reason}"
+            )
+            await self.notify_group(group_message)
+    
     async def cmd_who_opted_out(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show opt-outs."""
+        """Show opt-outs (AVAILABLE IN BOTH)."""
         with get_db() as db:
             if not context.args:
                 opt_outs = (
@@ -973,7 +1281,7 @@ class CorridorBot:
     
     def run(self):
         """Start the bot."""
-        logger.info("Starting Pablito's Corridor Manager Bot (Interactive Version)...")
+        logger.info("Starting Pablito's Corridor Manager Bot (Private/Group Version)...")
         self.app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
