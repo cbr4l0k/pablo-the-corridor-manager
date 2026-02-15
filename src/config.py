@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     
     # Week Configuration
-    week_deadline_day: str = "friday"
+    week_deadline_day: str = "sunday"
     week_deadline_hour: int = 12
     week_deadline_minute: int = 0
     
