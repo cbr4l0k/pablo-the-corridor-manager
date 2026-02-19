@@ -64,6 +64,7 @@ For the parity migration workstream, initialize Convex and schema tooling with B
 
 ```bash
 bun install
+cp .env.local.example .env.local
 bun run convex:dev:local
 ```
 

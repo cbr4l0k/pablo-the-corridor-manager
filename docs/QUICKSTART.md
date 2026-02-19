@@ -2,6 +2,21 @@
 
 ## 🚀 Get Up and Running in 5 Minutes
 
+## TypeScript + Local Convex (Migration Path)
+
+```bash
+bun install
+cp .env.local.example .env.local
+bun run convex:dev:local
+```
+
+In another terminal:
+
+```bash
+bun run seed:convex
+bun run bot:dev
+```
+
 ### Prerequisites Check
 ```bash
 # Check if you have the required tools
