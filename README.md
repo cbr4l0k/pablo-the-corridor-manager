@@ -58,6 +58,26 @@ cd corridor-bot
 cp .env.example .env
 ```
 
+### TypeScript + Convex Migration Bootstrap (Bun)
+
+For the parity migration workstream, initialize Convex and schema tooling with Bun:
+
+```bash
+bun install
+bun run convex:dev
+```
+
+In a separate terminal, run the parity seed entrypoint:
+
+```bash
+bun run seed:convex
+```
+
+This will seed:
+- Canonical task types from `scripts/populate_db.py`
+- Current ISO week record (if missing)
+- Task instances for all task types in that week (parity behavior)
+
 ### 2. Configure Environment
 
 Edit `.env` and set:
@@ -315,4 +335,3 @@ For issues or questions:
 2. Review `scripts/populate_db.py` for data structure examples
 3. Check database with pgAdmin
 4. Open an issue on GitHub (if applicable)
-

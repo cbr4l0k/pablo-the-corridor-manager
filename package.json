@@ -1,0 +1,19 @@
+{
+  "name": "pablo-the-corridor-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bunx convex dev",
+    "convex:dev": "bunx convex dev",
+    "convex:deploy": "bunx convex deploy",
+    "seed:convex": "bunx convex run seeds:bootstrapSeed"
+  },
+  "dependencies": {
+    "convex": "^1.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3"
+  }
+}
