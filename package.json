@@ -4,8 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bunx convex dev",
+    "dev": "bun run bot:dev",
+    "ts:check": "tsc --noEmit",
+    "bot:dev": "bun run src/app.ts",
     "convex:dev": "bunx convex dev",
+    "convex:dev:local": "bunx convex dev --configure existing --dev-deployment local",
     "convex:deploy": "bunx convex deploy",
     "seed:convex": "bunx convex run seeds:bootstrapSeed"
   },

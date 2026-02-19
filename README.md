@@ -64,7 +64,7 @@ For the parity migration workstream, initialize Convex and schema tooling with B
 
 ```bash
 bun install
-bun run convex:dev
+bun run convex:dev:local
 ```
 
 In a separate terminal, run the parity seed entrypoint:
@@ -72,6 +72,16 @@ In a separate terminal, run the parity seed entrypoint:
 ```bash
 bun run seed:convex
 ```
+
+Run the TypeScript bot runtime (long polling + Convex backend):
+
+```bash
+bun run bot:dev
+```
+
+Notes:
+- This migration path uses local Convex dev deployments by default.
+- Keep the Python runtime as fallback during parity validation.
 
 This will seed:
 - Canonical task types from `scripts/populate_db.py`
